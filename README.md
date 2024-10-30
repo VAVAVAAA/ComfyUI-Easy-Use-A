@@ -56,9 +56,19 @@ Double-click install.bat to install the required dependencies
 
 ## 📜 Changelog
 
+**v1.2.4**
+
+- Added `easy imageSplitTiles` and `easy imageTilesFromBatch`
+- Support `model_override`,`vae_override`,`clip_override` can be input separately to `easy fullLoader`
+- Added `easy saveImageLazy`
+- Added `easy loadImageForLoop`
+- Added `easy isFileExist`
+- Added `easy saveText`
+
 **v1.2.3**
 
-- Added human parts segmentation to `easy humanSegmentation` - Code based on (ComfyUI_Human_Parts)[https://github.com/metal3d/ComfyUI_Human_Parts]
+- `easy showAnything` and `easy cleanGPUUsed` added slot of output
+- Added human parts segmentation to `easy humanSegmentation` - Code based on [ComfyUI_Human_Parts](https://github.com/metal3d/ComfyUI_Human_Parts)
 - Using FluxGuidance when you are using a flux model and choose basicGuider and set the cfg>0 on `easy preSamplingCustom`
 - Added `easy loraStackApply` and `easy controlnetStackApply` - Apply loraStack and controlnetStack
 

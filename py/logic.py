@@ -3,18 +3,26 @@ from _decimal import Context, getcontext
 from decimal import Decimal
 from .libs.utils import AlwaysEqualProxy, ByPassTypeTuple, cleanGPUUsedForce, compare_revision
 from .libs.cache import cache, update_cache, remove_cache
+from .libs.log import log_node_info, log_node_warn
+from nodes import PreviewImage, SaveImage
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL.PngImagePlugin import PngInfo
 import numpy as np
+import os
 import re
+import csv
 import json
 import torch
 import comfy.utils
-
+import folder_paths
 
 DEFAULT_FLOW_NUM = 2
 MAX_FLOW_NUM = 10
 lazy_options = {"lazy": True} if compare_revision(2543) else {}
 
 any_type = AlwaysEqualProxy("*")
+
+
 def validate_list_args(args: Dict[str, List[Any]]) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Checks that if there are multiple arguments, they are all the same length or 1
@@ -40,6 +48,8 @@ def validate_list_args(args: Dict[str, List[Any]]) -> Tuple[bool, Optional[str],
                 return False, arg_name, matched_arg_name
 
     return True, None, None
+
+
 def error_if_mismatched_list_args(args: Dict[str, List[Any]]) -> None:
     is_valid, failed_key1, failed_key2 = validate_list_args(args)
     if not is_valid:
@@ -48,6 +58,7 @@ def error_if_mismatched_list_args(args: Dict[str, List[Any]]) -> None:
         raise ValueError(
             f"Mismatched list inputs received. {failed_key1}({len(args[failed_key1])}) !== {failed_key2}({len(args[failed_key2])})"
         )
+
 
 def zip_with_fill(*lists: Union[List[Any], None]) -> Iterator[Tuple[Any, ...]]:
     """
@@ -60,6 +71,7 @@ def zip_with_fill(*lists: Union[List[Any], None]) -> Iterator[Tuple[Any, ...]]:
     max_len = max(len(lst) if lst is not None else 0 for lst in lists)
     for i in range(max_len):
         yield tuple(None if lst is None else (lst[0] if len(lst) == 1 else lst[i]) for lst in lists)
+
 
 # ---------------------------------------------------------------类型 开始----------------------------------------------------------------------#
 
@@ -79,12 +91,13 @@ class String:
     def execute(self, value):
         return (value,)
 
+
 # 整数
 class Int:
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": {"value": ("INT", {"default": 0, "min": -999999, "max": 999999,})},
+            "required": {"value": ("INT", {"default": 0, "min": -999999, "max": 999999, })},
         }
 
     RETURN_TYPES = ("INT",)
@@ -94,6 +107,7 @@ class Int:
 
     def execute(self, value):
         return (value,)
+
 
 # 整数范围
 class RangeInt:
@@ -122,14 +136,14 @@ class RangeInt:
     CATEGORY = "EasyUse/Logic/Type"
 
     def build_range(
-        self,  range_mode, start, stop, step,  num_steps, end_mode
+            self, range_mode, start, stop, step, num_steps, end_mode
     ) -> Tuple[List[int], List[int]]:
         error_if_mismatched_list_args(locals())
 
         ranges = []
         range_sizes = []
         for range_mode, e_start, e_stop, e_num_steps, e_step, e_end_mode in zip_with_fill(
-            range_mode, start, stop, num_steps, step, end_mode
+                range_mode, start, stop, num_steps, step, end_mode
         ):
             if range_mode == 'step':
                 if e_end_mode == "Inclusive":
@@ -147,13 +161,12 @@ class RangeInt:
         return ranges, range_sizes
 
 
-
 # 浮点数
 class Float:
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": {"value": ("FLOAT", {"default": 0, "step": 0.01, "min": -999999, "max": 999999,})},
+            "required": {"value": ("FLOAT", {"default": 0, "step": 0.01, "min": -999999, "max": 999999, })},
         }
 
     RETURN_TYPES = ("FLOAT",)
@@ -193,7 +206,7 @@ class RangeFloat:
 
     @staticmethod
     def _decimal_range(
-           range_mode: String, start: Decimal, stop: Decimal, step: Decimal, num_steps: Int, inclusive: bool
+            range_mode: String, start: Decimal, stop: Decimal, step: Decimal, num_steps: Int, inclusive: bool
     ) -> Iterator[float]:
         if range_mode == 'step':
             ret_val = start
@@ -260,6 +273,7 @@ class Boolean:
     def execute(self, value):
         return (value,)
 
+
 # ---------------------------------------------------------------开关 开始----------------------------------------------------------------------#
 class imageSwitch:
     def __init__(self):
@@ -283,9 +297,10 @@ class imageSwitch:
     def image_switch(self, image_a, image_b, boolean):
 
         if boolean:
-            return (image_a, )
+            return (image_a,)
         else:
-            return (image_b, )
+            return (image_b,)
+
 
 class textSwitch:
     @classmethod
@@ -305,11 +320,12 @@ class textSwitch:
     CATEGORY = "EasyUse/Logic/Switch"
     FUNCTION = "switch"
 
-    def switch(self, input, text1=None, text2=None,):
+    def switch(self, input, text1=None, text2=None, ):
         if input == 1:
             return (text1,)
         else:
             return (text2,)
+
 
 # ---------------------------------------------------------------Index Switch----------------------------------------------------------------------#
 
@@ -317,9 +333,9 @@ class ab:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-                "A or B": ("BOOLEAN", {"default": True,  "label_on": "A", "label_off": "B"}),
-                "in": (any_type,),
-            },
+            "A or B": ("BOOLEAN", {"default": True, "label_on": "A", "label_off": "B"}),
+            "in": (any_type,),
+        },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
@@ -333,11 +349,12 @@ class ab:
         from comfy_execution.graph import ExecutionBlocker
         return ExecutionBlocker(None) if block else value
 
-    def switch(self,  unique_id, **kwargs):
+    def switch(self, unique_id, **kwargs):
         is_a = kwargs['A or B']
         a = self.blocker(kwargs['in'], not is_a)
         b = self.blocker(kwargs['in'], is_a)
         return (a, b)
+
 
 class anythingInversedSwitch:
 
@@ -367,13 +384,14 @@ class anythingInversedSwitch:
                 res.append(ExecutionBlocker(None))
         return res
 
+
 class anythingIndexSwitch:
     def __init__(self):
         pass
 
     @classmethod
     def INPUT_TYPES(cls):
-        inputs =  {
+        inputs = {
             "required": {
                 "index": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1}),
             },
@@ -381,7 +399,7 @@ class anythingIndexSwitch:
             }
         }
         for i in range(MAX_FLOW_NUM):
-            inputs["optional"]["value%d" % i] = (any_type,lazy_options)
+            inputs["optional"]["value%d" % i] = (any_type, lazy_options)
         return inputs
 
     RETURN_TYPES = (any_type,)
@@ -399,13 +417,14 @@ class anythingIndexSwitch:
         key = "value%d" % index
         return (kwargs[key],)
 
+
 class imageIndexSwitch:
     def __init__(self):
         pass
 
     @classmethod
     def INPUT_TYPES(cls):
-        inputs =  {
+        inputs = {
             "required": {
                 "index": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1}),
             },
@@ -413,7 +432,7 @@ class imageIndexSwitch:
             }
         }
         for i in range(MAX_FLOW_NUM):
-            inputs["optional"]["image%d" % i] = ("IMAGE",lazy_options)
+            inputs["optional"]["image%d" % i] = ("IMAGE", lazy_options)
         return inputs
 
     RETURN_TYPES = ("IMAGE",)
@@ -431,13 +450,14 @@ class imageIndexSwitch:
         key = "image%d" % index
         return (kwargs[key],)
 
+
 class textIndexSwitch:
     def __init__(self):
         pass
 
     @classmethod
     def INPUT_TYPES(cls):
-        inputs =  {
+        inputs = {
             "required": {
                 "index": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1}),
             },
@@ -445,7 +465,7 @@ class textIndexSwitch:
             }
         }
         for i in range(MAX_FLOW_NUM):
-            inputs["optional"]["text%d" % i] = ("STRING", {**lazy_options, "forceInput":True})
+            inputs["optional"]["text%d" % i] = ("STRING", {**lazy_options, "forceInput": True})
         return inputs
 
     RETURN_TYPES = ("STRING",)
@@ -463,13 +483,14 @@ class textIndexSwitch:
         key = "text%d" % index
         return (kwargs[key],)
 
+
 class conditioningIndexSwitch:
     def __init__(self):
         pass
 
     @classmethod
     def INPUT_TYPES(cls):
-        inputs =  {
+        inputs = {
             "required": {
                 "index": ("INT", {"default": 0, "min": 0, "max": 9, "step": 1}),
             },
@@ -477,7 +498,7 @@ class conditioningIndexSwitch:
             }
         }
         for i in range(MAX_FLOW_NUM):
-            inputs["optional"]["cond%d" % i] = ("CONDITIONING",lazy_options)
+            inputs["optional"]["cond%d" % i] = ("CONDITIONING", lazy_options)
         return inputs
 
     RETURN_TYPES = ("CONDITIONING",)
@@ -494,6 +515,7 @@ class conditioningIndexSwitch:
     def index_switch(self, index, **kwargs):
         key = "cond%d" % index
         return (kwargs[key],)
+
 
 # ---------------------------------------------------------------Math----------------------------------------------------------------------#
 class mathIntOperation:
@@ -529,6 +551,7 @@ class mathIntOperation:
         elif operation == "power":
             return (a ** b,)
 
+
 class mathFloatOperation:
     def __init__(self):
         pass
@@ -561,6 +584,7 @@ class mathFloatOperation:
             return (a % b,)
         elif operation == "power":
             return (a ** b,)
+
 
 class mathStringOperation:
     def __init__(self):
@@ -603,11 +627,13 @@ class mathStringOperation:
         elif operation == "a ENDSWITH b":
             return (a.endswith(b),)
 
+
 # ---------------------------------------------------------------Flow----------------------------------------------------------------------#
 try:
     from comfy_execution.graph_utils import GraphBuilder, is_link
 except:
     GraphBuilder = None
+
 
 class whileLoopStart:
     def __init__(self):
@@ -623,10 +649,10 @@ class whileLoopStart:
             },
         }
         for i in range(MAX_FLOW_NUM):
-            inputs["optional"]["initial_value%d" % i] = ("*",)
+            inputs["optional"]["initial_value%d" % i] = (any_type,)
         return inputs
 
-    RETURN_TYPES = ByPassTypeTuple(tuple(["FLOW_CONTROL"] + ["*"] * MAX_FLOW_NUM))
+    RETURN_TYPES = ByPassTypeTuple(tuple(["FLOW_CONTROL"] + [any_type] * MAX_FLOW_NUM))
     RETURN_NAMES = ByPassTypeTuple(tuple(["flow"] + ["value%d" % i for i in range(MAX_FLOW_NUM)]))
     FUNCTION = "while_loop_open"
 
@@ -637,6 +663,7 @@ class whileLoopStart:
         for i in range(MAX_FLOW_NUM):
             values.append(kwargs.get("initial_value%d" % i, None))
         return tuple(["stub"] + values)
+
 
 class whileLoopEnd:
     def __init__(self):
@@ -657,10 +684,10 @@ class whileLoopEnd:
             }
         }
         for i in range(MAX_FLOW_NUM):
-            inputs["optional"]["initial_value%d" % i] = (AlwaysEqualProxy('*'),)
+            inputs["optional"]["initial_value%d" % i] = (any_type,)
         return inputs
 
-    RETURN_TYPES = ByPassTypeTuple(tuple([AlwaysEqualProxy('*')] * MAX_FLOW_NUM))
+    RETURN_TYPES = ByPassTypeTuple(tuple([any_type] * MAX_FLOW_NUM))
     RETURN_NAMES = ByPassTypeTuple(tuple(["value%d" % i for i in range(MAX_FLOW_NUM)]))
     FUNCTION = "while_loop_close"
 
@@ -685,7 +712,6 @@ class whileLoopEnd:
             if child_id not in contained:
                 contained[child_id] = True
                 self.collect_contained(child_id, upstream, contained)
-
 
     def while_loop_close(self, flow, condition, dynprompt=None, unique_id=None, **kwargs):
         if not condition:
@@ -733,6 +759,7 @@ class whileLoopEnd:
             "expand": graph.finalize(),
         }
 
+
 class forLoopStart:
     def __init__(self):
         pass
@@ -763,18 +790,20 @@ class forLoopStart:
     def for_loop_start(self, total, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
         graph = GraphBuilder()
         i = 0
-        unique_id = unique_id.split('.')[len(unique_id.split('.'))-1] if "." in unique_id else unique_id
-        update_cache('forloop'+str(unique_id), 'forloop', total)
+        unique_id = unique_id.split('.')[len(unique_id.split('.')) - 1] if "." in unique_id else unique_id
+        update_cache('forloop' + str(unique_id), 'forloop', total)
         if "initial_value0" in kwargs:
             i = kwargs["initial_value0"]
 
-        initial_values = {("initial_value%d" % num): kwargs.get("initial_value%d" % num, None) for num in range(1, MAX_FLOW_NUM)}
+        initial_values = {("initial_value%d" % num): kwargs.get("initial_value%d" % num, None) for num in
+                          range(1, MAX_FLOW_NUM)}
         while_open = graph.node("easy whileLoopStart", condition=total, initial_value0=i, **initial_values)
         outputs = [kwargs.get("initial_value%d" % num, None) for num in range(1, MAX_FLOW_NUM)]
         return {
             "result": tuple(["stub", i] + outputs),
             "expand": graph.finalize(),
         }
+
 
 class forLoopEnd:
     def __init__(self):
@@ -806,8 +835,8 @@ class forLoopEnd:
         graph = GraphBuilder()
         while_open = flow[0]
         total = None
-        if "forloop"+str(while_open) in cache:
-            total = cache['forloop'+str(while_open)][1]
+        if "forloop" + str(while_open) in cache:
+            total = cache['forloop' + str(while_open)][1]
         elif extra_pnginfo:
             all_nodes = extra_pnginfo['workflow']['nodes']
             start_node = next((x for x in all_nodes if x['id'] == int(while_open)), None)
@@ -828,6 +857,7 @@ class forLoopEnd:
             "expand": graph.finalize(),
         }
 
+
 COMPARE_FUNCTIONS = {
     "a == b": lambda a, b: a == b,
     "a != b": lambda a, b: a != b,
@@ -836,6 +866,7 @@ COMPARE_FUNCTIONS = {
     "a <= b": lambda a, b: a <= b,
     "a >= b": lambda a, b: a >= b,
 }
+
 
 # 比较
 class Compare:
@@ -857,6 +888,7 @@ class Compare:
 
     def compare(self, a, b, comparison):
         return (COMPARE_FUNCTIONS[comparison](a, b),)
+
 
 # 判断
 class IfElse:
@@ -902,10 +934,13 @@ class Blocker:
 
     def execute(self, **kwargs):
         from comfy_execution.graph import ExecutionBlocker
-        return (kwargs['in'] if kwargs['continue'] else ExecutionBlocker(None) ,)
+        return (kwargs['in'] if kwargs['continue'] else ExecutionBlocker(None),)
 
-#是否为SDXL
+
+# 是否为SDXL
 from comfy.sdxl_clip import SDXLClipModel, SDXLRefinerClipModel, SDXLClipG
+
+
 class isNone:
     @classmethod
     def INPUT_TYPES(s):
@@ -924,6 +959,7 @@ class isNone:
 
     def execute(self, any):
         return (True if any is None else False,)
+
 
 class isSDXL:
     @classmethod
@@ -950,8 +986,44 @@ class isSDXL:
         else:
             return (False,)
 
+
+class isFileExist:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "file_path": ("STRING", {"default": ""}),
+                "file_name": ("STRING", {"default": ""}),
+                "file_extension": ("STRING", {"default": ""}),
+            },
+            "optional": {
+            }
+        }
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("boolean",)
+    FUNCTION = "execute"
+    CATEGORY = "EasyUse/Logic"
+
+    def execute(self, file_path, file_name, file_extension):
+        if not file_path:
+            raise Exception("file_path is missing")
+
+        if file_name:
+            file_path = os.path.join(file_path, file_name)
+        if file_extension:
+            file_path = file_path + "." + file_extension
+
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return (True,)
+        else:
+            return (False,)
+
+
 from nodes import MAX_RESOLUTION
 from .config import BASE_RESOLUTIONS
+
+
 class pixels:
 
     @classmethod
@@ -985,8 +1057,8 @@ class pixels:
 
         width = width * scale
         height = height * scale
-        width_norm = width - width % 8
-        height_norm = height - height % 8
+        width_norm = int(width - width % 8)
+        height_norm = int(height - height % 8)
         flip_wh = kwargs['flip_w/h']
         if flip_wh:
             width, height = height, width
@@ -994,7 +1066,8 @@ class pixels:
 
         return (width_norm, height_norm, width, height, scale)
 
-#xy矩阵
+
+# xy矩阵
 class xyAny:
 
     @classmethod
@@ -1031,6 +1104,7 @@ class xyAny:
 
         return (new_x, new_y)
 
+
 class lengthAnything:
     @classmethod
     def INPUT_TYPES(s):
@@ -1051,13 +1125,33 @@ class lengthAnything:
             return
         return (len(any),)
 
+class indexAnything:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "any": (any_type, {}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 1000000, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("out",)
+
+    FUNCTION = "getIndex"
+    CATEGORY = "EasyUse/Logic"
+
+    def getIndex(self, any, index):
+        return (any[index],)
+
+
 class batchAnything:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "any_1": (any_type,{}),
-                "any_2": (any_type,{})
+                "any_1": (any_type, {}),
+                "any_2": (any_type, {})
             }
         }
 
@@ -1067,14 +1161,31 @@ class batchAnything:
     FUNCTION = "batch"
     CATEGORY = "EasyUse/Logic"
 
+    def latentBatch(self, any_1, any_2):
+        samples_out = any_1.copy()
+        s1 = any_1["samples"]
+        s2 = any_2["samples"]
+
+        if s1.shape[1:] != s2.shape[1:]:
+            s2 = comfy.utils.common_upscale(s2, s1.shape[3], s1.shape[2], "bilinear", "center")
+        s = torch.cat((s1, s2), dim=0)
+        samples_out["samples"] = s
+        samples_out["batch_index"] = any_1.get("batch_index",
+                                               [x for x in range(0, s1.shape[0])]) + any_2.get(
+            "batch_index", [x for x in range(0, s2.shape[0])])
+
+        return samples_out
+
     def batch(self, any_1, any_2):
+
         if isinstance(any_1, torch.Tensor) or isinstance(any_2, torch.Tensor):
             if any_1 is None:
                 return (any_2,)
             elif any_2 is None:
                 return (any_1,)
             if any_1.shape[1:] != any_2.shape[1:]:
-                any_2 = comfy.utils.common_upscale(any_2.movedim(-1, 1), any_1.shape[2], any_1.shape[1], "bilinear", "center").movedim(1, -1)
+                any_2 = comfy.utils.common_upscale(any_2.movedim(-1, 1), any_1.shape[2], any_1.shape[1], "bilinear",
+                                                   "center").movedim(1, -1)
             return (torch.cat((any_1, any_2), 0),)
         elif isinstance(any_1, (str, float, int)):
             if any_2 is None:
@@ -1088,12 +1199,23 @@ class batchAnything:
             elif isinstance(any_1, tuple):
                 return (any_1 + (any_2,),)
             return ((any_2, any_1),)
+        elif isinstance(any_1, dict) and 'samples' in any_1:
+            if any_2 is None:
+                return (any_1,)
+            elif isinstance(any_2, dict) and 'samples' in any_2:
+                return (self.latentBatch(any_1, any_2),)
+        elif isinstance(any_2, dict) and 'samples' in any_2:
+            if any_1 is None:
+                return (any_2,)
+            elif isinstance(any_1, dict) and 'samples' in any_1:
+                return (self.latentBatch(any_2, any_1),)
         else:
             if any_1 is None:
                 return (any_2,)
             elif any_2 is None:
                 return (any_1,)
             return (any_1 + any_2,)
+
 
 # 转换所有类型
 class convertAnything:
@@ -1129,9 +1251,10 @@ class showAnything:
     def INPUT_TYPES(s):
         return {"required": {}, "optional": {"anything": (any_type, {}), },
                 "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",
-            }}
+                           }}
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ('output',)
     INPUT_IS_LIST = True
     OUTPUT_NODE = True
     FUNCTION = "log_input"
@@ -1161,15 +1284,32 @@ class showAnything:
             node = next((x for x in workflow["nodes"] if str(x["id"]) == unique_id[0]), None)
             if node:
                 node["widgets_values"] = [values]
+        if isinstance(values, list) and len(values) == 1:
+            return {"ui": {"text": values}, "result": (values[0],), }
+        else:
+            return {"ui": {"text": values}, "result": (values,), }
 
-        return {"ui": {"text": values}}
+class showAnythingLazy(showAnything):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {}, "optional": {"anything": (any_type, {}), },
+                "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",
+                           }}
+
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ('output',)
+    INPUT_IS_LIST = True
+    OUTPUT_NODE = False
+    OUTPUT_IS_LIST = (False,)
+    FUNCTION = "log_input"
+    CATEGORY = "EasyUse/Logic"
 
 class showTensorShape:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"tensor": (any_type,)}, "optional": {},
                 "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"
-               }}
+                           }}
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
@@ -1194,6 +1334,7 @@ class showTensorShape:
 
         return {"ui": {"text": shapes}}
 
+
 class outputToList:
     @classmethod
     def INPUT_TYPES(s):
@@ -1212,6 +1353,7 @@ class outputToList:
     def output_to_List(self, tuple):
         return (tuple,)
 
+
 # cleanGpuUsed
 class cleanGPUUsed:
     @classmethod
@@ -1220,8 +1362,8 @@ class cleanGPUUsed:
                 "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",
                            }}
 
-    RETURN_TYPES = ()
-    RETURN_NAMES = ()
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("output",)
     OUTPUT_NODE = True
     FUNCTION = "empty_cache"
     CATEGORY = "EasyUse/Logic"
@@ -1229,7 +1371,8 @@ class cleanGPUUsed:
     def empty_cache(self, anything, unique_id=None, extra_pnginfo=None):
         cleanGPUUsedForce()
         remove_cache('*')
-        return ()
+        return (anything,)
+
 
 class clearCacheKey:
     @classmethod
@@ -1238,18 +1381,19 @@ class clearCacheKey:
             "anything": (any_type, {}),
             "cache_key": ("STRING", {"default": "*"}),
         }, "optional": {},
-            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",}
+            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO", }
         }
 
-    RETURN_TYPES = ()
-    RETURN_NAMES = ()
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ('output',)
     OUTPUT_NODE = True
     FUNCTION = "empty_cache"
     CATEGORY = "EasyUse/Logic"
 
     def empty_cache(self, anything, cache_name, unique_id=None, extra_pnginfo=None):
         remove_cache(cache_name)
-        return ()
+        return (anything,)
+
 
 class clearCacheAll:
     @classmethod
@@ -1257,18 +1401,19 @@ class clearCacheAll:
         return {"required": {
             "anything": (any_type, {}),
         }, "optional": {},
-            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",}
+            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO", }
         }
 
-    RETURN_TYPES = ()
-    RETURN_NAMES = ()
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("output",)
     OUTPUT_NODE = True
     FUNCTION = "empty_cache"
     CATEGORY = "EasyUse/Logic"
 
     def empty_cache(self, anything, unique_id=None, extra_pnginfo=None):
         remove_cache('*')
-        return ()
+        return (anything,)
+
 
 # Deprecated
 class If:
@@ -1291,144 +1436,346 @@ class If:
     def execute(self, *args, **kwargs):
         return (kwargs['if'] if kwargs['any'] else kwargs['else'],)
 
-class poseEditor:
-  @classmethod
-  def INPUT_TYPES(s):
-    return {"required": {
-        "image": ("STRING", {"default":""})
-    }}
 
-  FUNCTION = "output_pose"
-  CATEGORY = "EasyUse/🚫 Deprecated"
-  DEPRECATED = True
-  RETURN_TYPES = ()
-  RETURN_NAMES = ()
-  def output_pose(self, image):
-      return ()
+class poseEditor:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "image": ("STRING", {"default": ""})
+        }}
+
+    FUNCTION = "output_pose"
+    CATEGORY = "EasyUse/🚫 Deprecated"
+    DEPRECATED = True
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+
+    def output_pose(self, image):
+        return ()
+
 
 class imageToMask:
-  @classmethod
-  def INPUT_TYPES(s):
-    return {"required": {
-        "image": ("IMAGE",),
-        "channel": (['red', 'green', 'blue'],),
-       }
-    }
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "image": ("IMAGE",),
+            "channel": (['red', 'green', 'blue'],),
+        }
+        }
 
-  RETURN_TYPES = ("MASK",)
-  FUNCTION = "convert"
-  CATEGORY = "EasyUse/🚫 Deprecated"
-  DEPRECATED = True
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "convert"
+    CATEGORY = "EasyUse/🚫 Deprecated"
+    DEPRECATED = True
 
-  def convert_to_single_channel(self, image, channel='red'):
-    from PIL import Image
-    # Convert to RGB mode to access individual channels
-    image = image.convert('RGB')
+    def convert_to_single_channel(self, image, channel='red'):
+        from PIL import Image
+        # Convert to RGB mode to access individual channels
+        image = image.convert('RGB')
 
-    # Extract the desired channel and convert to greyscale
-    if channel == 'red':
-      channel_img = image.split()[0].convert('L')
-    elif channel == 'green':
-      channel_img = image.split()[1].convert('L')
-    elif channel == 'blue':
-      channel_img = image.split()[2].convert('L')
-    else:
-      raise ValueError(
-        "Invalid channel option. Please choose 'red', 'green', or 'blue'.")
+        # Extract the desired channel and convert to greyscale
+        if channel == 'red':
+            channel_img = image.split()[0].convert('L')
+        elif channel == 'green':
+            channel_img = image.split()[1].convert('L')
+        elif channel == 'blue':
+            channel_img = image.split()[2].convert('L')
+        else:
+            raise ValueError(
+                "Invalid channel option. Please choose 'red', 'green', or 'blue'.")
 
-    # Convert the greyscale channel back to RGB mode
-    channel_img = Image.merge(
-      'RGB', (channel_img, channel_img, channel_img))
+        # Convert the greyscale channel back to RGB mode
+        channel_img = Image.merge(
+            'RGB', (channel_img, channel_img, channel_img))
 
-    return channel_img
+        return channel_img
 
-  def convert(self, image, channel='red'):
-    from .libs.image import pil2tensor, tensor2pil
-    image = self.convert_to_single_channel(tensor2pil(image), channel)
-    image = pil2tensor(image)
-    return (image.squeeze().mean(2),)
+    def convert(self, image, channel='red'):
+        from .libs.image import pil2tensor, tensor2pil
+        image = self.convert_to_single_channel(tensor2pil(image), channel)
+        image = pil2tensor(image)
+        return (image.squeeze().mean(2),)
+
+
+class saveText:
+
+    def __init__(self):
+        self.output_dir = folder_paths.output_directory
+        self.type = 'output'
+
+    @classmethod
+    def INPUT_TYPES(s):
+        input_types = {}
+        input_types['required'] = {
+            "text": ("STRING", {"default": "", "forceInput": True}),
+            "output_file_path": ("STRING", {"multiline": False, "default": ""}),
+            "file_name": ("STRING", {"multiline": False, "default": ""}),
+            "file_extension": (["txt", "csv"],),
+            "overwrite": ("BOOLEAN", {"default": True}),
+        }
+        input_types['optional'] = {
+            "image": ("IMAGE",),
+        }
+        return input_types
+
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("text", 'image',)
+
+    FUNCTION = "save_text"
+    OUTPUT_NODE = True
+    CATEGORY = "EasyUse/Logic"
+
+    def save_image(self, images, filename_prefix='', extension='png',quality=100, prompt=None,
+                   extra_pnginfo=None, delimiter='_', filename_number_start='true', number_padding=4,
+                   overwrite_mode='prefix_as_filename', output_path='', show_history='true', show_previews='true',
+                   embed_workflow='true', lossless_webp=False, ):
+        results = list()
+        for image in images:
+            i = 255. * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+
+            # Delegate metadata/pnginfo
+            if extension == 'webp':
+                img_exif = img.getexif()
+                workflow_metadata = ''
+                prompt_str = ''
+                if prompt is not None:
+                    prompt_str = json.dumps(prompt)
+                    img_exif[0x010f] = "Prompt:" + prompt_str
+                if extra_pnginfo is not None:
+                    for x in extra_pnginfo:
+                        workflow_metadata += json.dumps(extra_pnginfo[x])
+                img_exif[0x010e] = "Workflow:" + workflow_metadata
+                exif_data = img_exif.tobytes()
+            else:
+                metadata = PngInfo()
+                if embed_workflow == 'true':
+                    if prompt is not None:
+                        metadata.add_text("prompt", json.dumps(prompt))
+                    if extra_pnginfo is not None:
+                        for x in extra_pnginfo:
+                            metadata.add_text(x, json.dumps(extra_pnginfo[x]))
+                exif_data = metadata
+
+            file = f"{filename_prefix}.{extension}"
+
+            # Save the images
+            try:
+                output_file = os.path.abspath(os.path.join(output_path, file))
+                if extension in ["jpg", "jpeg"]:
+                    img.save(output_file,
+                             quality=quality, optimize=True)
+                elif extension == 'webp':
+                    img.save(output_file,
+                             quality=quality, lossless=lossless_webp, exif=exif_data)
+                elif extension == 'png':
+                    img.save(output_file,
+                             pnginfo=exif_data, optimize=True)
+                elif extension == 'bmp':
+                    img.save(output_file)
+                elif extension == 'tiff':
+                    img.save(output_file,
+                             quality=quality, optimize=True)
+                else:
+                    img.save(output_file,
+                             pnginfo=exif_data, optimize=True)
+
+            except OSError as e:
+                print(e)
+            except Exception as e:
+                print(e)
+
+    def save_text(self, text, output_file_path, file_name, file_extension, overwrite, filename_number_start='true', image=None, prompt=None,
+                  extra_pnginfo=None):
+        if isinstance(file_name, list):
+            file_name = file_name[0]
+        filepath = str(os.path.join(output_file_path, file_name)) + "." + file_extension
+        index = 1
+
+        if (output_file_path == "" or file_name == ""):
+            log_node_warn("Save Text", "No file details found. No file output.")
+            return ()
+
+        if not os.path.exists(output_file_path):
+            os.makedirs(output_file_path)
+
+        if not overwrite:
+            while os.path.exists(filepath):
+                if os.path.exists(filepath):
+                    filepath = str(os.path.join(output_file_path, file_name)) + "_" + str(index) + "." + file_extension
+                    index = index + 1
+                else:
+                    break
+
+        log_node_info("Save Text", f"Saving to {filepath}")
+
+        if file_extension == "csv":
+            text_list = []
+            for i in text.split("\n"):
+                text_list.append(i.strip())
+
+            with open(filepath, "w", newline="") as csv_file:
+                csv_writer = csv.writer(csv_file)
+                # Write each line as a separate row in the CSV file
+                for line in text_list:
+                    csv_writer.writerow([line])
+        else:
+            with open(filepath, "w", newline="") as text_file:
+                for line in text:
+                    text_file.write(line)
+
+        result = {"result": (text, None)}
+
+        if image is not None:
+            imagepath = os.path.join(output_file_path, file_name)
+            image_index = 1
+            if not overwrite:
+                while os.path.exists(filepath):
+                    if os.path.exists(filepath):
+                        imagepath = str(os.path.join(output_file_path, file_name)) + "_" + str(index)
+                        index = index + 1
+                    else:
+                        break
+            # result = self.save_images(image, imagepath, prompt, extra_pnginfo)
+
+            delimiter = '_'
+            number_padding = 4
+            lossless_webp = (False,)
+
+            original_output = self.output_dir
+
+            # Setup output path
+            if output_file_path in [None, '', "none", "."]:
+                output_path = self.output_dir
+            else:
+                output_path = ''
+            if not os.path.isabs(output_file_path):
+                output_path = os.path.join(self.output_dir, output_path)
+            base_output = os.path.basename(output_path)
+            if output_path.endswith("ComfyUI/output") or output_path.endswith("ComfyUI\output"):
+                base_output = ""
+
+            # Check output destination
+            if output_path.strip() != '':
+                if not os.path.isabs(output_path):
+                    output_path = os.path.join(folder_paths.output_directory, output_path)
+                if not os.path.exists(output_path.strip()):
+                    print(
+                        f'The path `{output_path.strip()}` specified doesn\'t exist! Creating directory.')
+                    os.makedirs(output_path, exist_ok=True)
+
+            images = []
+            images.append(image)
+            images = torch.cat(images, dim=0)
+            self.save_image(images, imagepath, 'png', 100, prompt, extra_pnginfo, filename_number_start=filename_number_start, output_path=output_path, delimiter=delimiter,
+                             number_padding=number_padding, lossless_webp=lossless_webp)
+
+            log_node_info("Save Text", f"Saving Image to {imagepath}")
+            result['result'] = (text, image)
+
+        return result
+
+class saveTextLazy(saveText):
+
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("text", 'image',)
+
+    FUNCTION = "save_text"
+    OUTPUT_NODE = False
+    CATEGORY = "EasyUse/Logic"
+
 
 NODE_CLASS_MAPPINGS = {
-  "easy string": String,
-  "easy int": Int,
-  "easy rangeInt": RangeInt,
-  "easy float": Float,
-  "easy rangeFloat": RangeFloat,
-  "easy boolean": Boolean,
-  "easy mathString": mathStringOperation,
-  "easy mathInt": mathIntOperation,
-  "easy mathFloat": mathFloatOperation,
-  "easy compare": Compare,
-  "easy imageSwitch": imageSwitch,
-  "easy textSwitch": textSwitch,
-  "easy imageIndexSwitch": imageIndexSwitch,
-  "easy textIndexSwitch": textIndexSwitch,
-  "easy conditioningIndexSwitch": conditioningIndexSwitch,
-  "easy anythingIndexSwitch": anythingIndexSwitch,
-  "easy ab": ab,
-  "easy anythingInversedSwitch": anythingInversedSwitch,
-  "easy whileLoopStart": whileLoopStart,
-  "easy whileLoopEnd": whileLoopEnd,
-  "easy forLoopStart": forLoopStart,
-  "easy forLoopEnd": forLoopEnd,
-  "easy blocker": Blocker,
-  "easy ifElse": IfElse,
-  "easy isNone": isNone,
-  "easy isSDXL": isSDXL,
-  "easy outputToList": outputToList,
-  "easy pixels": pixels,
-  "easy xyAny": xyAny,
-  "easy lengthAnything": lengthAnything,
-  "easy batchAnything": batchAnything,
-  "easy convertAnything": convertAnything,
-  "easy showAnything": showAnything,
-  "easy showTensorShape": showTensorShape,
-  "easy clearCacheKey": clearCacheKey,
-  "easy clearCacheAll": clearCacheAll,
-  "easy cleanGpuUsed": cleanGPUUsed,
-  "easy if": If,
-  "easy poseEditor": poseEditor,
-  "easy imageToMask": imageToMask
+    "easy string": String,
+    "easy int": Int,
+    "easy rangeInt": RangeInt,
+    "easy float": Float,
+    "easy rangeFloat": RangeFloat,
+    "easy boolean": Boolean,
+    "easy mathString": mathStringOperation,
+    "easy mathInt": mathIntOperation,
+    "easy mathFloat": mathFloatOperation,
+    "easy compare": Compare,
+    "easy imageSwitch": imageSwitch,
+    "easy textSwitch": textSwitch,
+    "easy imageIndexSwitch": imageIndexSwitch,
+    "easy textIndexSwitch": textIndexSwitch,
+    "easy conditioningIndexSwitch": conditioningIndexSwitch,
+    "easy anythingIndexSwitch": anythingIndexSwitch,
+    "easy ab": ab,
+    "easy anythingInversedSwitch": anythingInversedSwitch,
+    "easy whileLoopStart": whileLoopStart,
+    "easy whileLoopEnd": whileLoopEnd,
+    "easy forLoopStart": forLoopStart,
+    "easy forLoopEnd": forLoopEnd,
+    "easy blocker": Blocker,
+    "easy ifElse": IfElse,
+    "easy isNone": isNone,
+    "easy isSDXL": isSDXL,
+    "easy isFileExist": isFileExist,
+    "easy outputToList": outputToList,
+    "easy pixels": pixels,
+    "easy xyAny": xyAny,
+    "easy lengthAnything": lengthAnything,
+    "easy indexAnything": indexAnything,
+    "easy batchAnything": batchAnything,
+    "easy convertAnything": convertAnything,
+    "easy showAnything": showAnything,
+    "easy showAnythingLazy": showAnythingLazy,
+    "easy showTensorShape": showTensorShape,
+    "easy clearCacheKey": clearCacheKey,
+    "easy clearCacheAll": clearCacheAll,
+    "easy cleanGpuUsed": cleanGPUUsed,
+    "easy saveText": saveText,
+    "easy saveTextLazy": saveTextLazy,
+    "easy if": If,
+    "easy poseEditor": poseEditor,
+    "easy imageToMask": imageToMask,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-  "easy string": "String",
-  "easy int": "Int",
-  "easy rangeInt": "Range(Int)",
-  "easy float": "Float",
-  "easy rangeFloat": "Range(Float)",
-  "easy boolean": "Boolean",
-  "easy compare": "Compare",
-  "easy mathString": "Math String",
-  "easy mathInt": "Math Int",
-  "easy mathFloat": "Math Float",
-  "easy imageSwitch": "Image Switch",
-  "easy textSwitch": "Text Switch",
-  "easy imageIndexSwitch": "Image Index Switch",
-  "easy textIndexSwitch": "Text Index Switch",
-  "easy conditioningIndexSwitch": "Conditioning Index Switch",
-  "easy anythingIndexSwitch": "Any Index Switch",
-  "easy ab": "A or B",
-  "easy anythingInversedSwitch": "Any Inversed Switch",
-  "easy whileLoopStart": "While Loop Start",
-  "easy whileLoopEnd": "While Loop End",
-  "easy forLoopStart": "For Loop Start",
-  "easy forLoopEnd": "For Loop End",
-  "easy ifElse": "If else",
-  "easy blocker": "Blocker",
-  "easy isNone": "Is None",
-  "easy isSDXL": "Is SDXL",
-  "easy outputToList": "Output to List",
-  "easy pixels": "Pixels W/H Norm",
-  "easy xyAny": "XY Any",
-  "easy lengthAnything": "Length Any",
-  "easy batchAnything": "Batch Any",
-  "easy convertAnything": "Convert Any",
-  "easy showAnything": "Show Any",
-  "easy showTensorShape": "Show Tensor Shape",
-  "easy clearCacheKey": "Clear Cache Key",
-  "easy clearCacheAll": "Clear Cache All",
-  "easy cleanGpuUsed": "Clean GPU Used",
-  "easy if": "If (🚫Deprecated)",
-  "easy poseEditor": "PoseEditor (🚫Deprecated)",
-  "easy imageToMask": "ImageToMask (🚫Deprecated)"
+    "easy string": "String",
+    "easy int": "Int",
+    "easy rangeInt": "Range(Int)",
+    "easy float": "Float",
+    "easy rangeFloat": "Range(Float)",
+    "easy boolean": "Boolean",
+    "easy compare": "Compare",
+    "easy mathString": "Math String",
+    "easy mathInt": "Math Int",
+    "easy mathFloat": "Math Float",
+    "easy imageSwitch": "Image Switch",
+    "easy textSwitch": "Text Switch",
+    "easy imageIndexSwitch": "Image Index Switch",
+    "easy textIndexSwitch": "Text Index Switch",
+    "easy conditioningIndexSwitch": "Conditioning Index Switch",
+    "easy anythingIndexSwitch": "Any Index Switch",
+    "easy ab": "A or B",
+    "easy anythingInversedSwitch": "Any Inversed Switch",
+    "easy whileLoopStart": "While Loop Start",
+    "easy whileLoopEnd": "While Loop End",
+    "easy forLoopStart": "For Loop Start",
+    "easy forLoopEnd": "For Loop End",
+    "easy ifElse": "If else",
+    "easy blocker": "Blocker",
+    "easy isNone": "Is None",
+    "easy isSDXL": "Is SDXL",
+    "easy isFileExist": "Is File Exist",
+    "easy outputToList": "Output to List",
+    "easy pixels": "Pixels W/H Norm",
+    "easy xyAny": "XY Any",
+    "easy lengthAnything": "Length Any",
+    "easy indexAnything": "Index Any",
+    "easy batchAnything": "Batch Any",
+    "easy convertAnything": "Convert Any",
+    "easy showAnything": "Show Any",
+    "easy showAnythingLazy": "Show Any (Lazy)",
+    "easy showTensorShape": "Show Tensor Shape",
+    "easy clearCacheKey": "Clear Cache Key",
+    "easy clearCacheAll": "Clear Cache All",
+    "easy cleanGpuUsed": "Clean VRAM Used",
+    "easy saveText": "Save Text",
+    "easy saveTextLazy": "Save Text (Lazy)",
+    "easy if": "If (🚫Deprecated)",
+    "easy poseEditor": "PoseEditor (🚫Deprecated)",
+    "easy imageToMask": "ImageToMask (🚫Deprecated)"
 }

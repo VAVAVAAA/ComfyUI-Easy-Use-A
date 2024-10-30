@@ -13,10 +13,10 @@ from urllib.request import urlopen
 from PIL import Image
 
 from server import PromptServer
-from nodes import MAX_RESOLUTION, LatentFromBatch, RepeatLatentBatch, NODE_CLASS_MAPPINGS as ALL_NODE_CLASS_MAPPINGS, ConditioningSetMask, ConditioningConcat, CLIPTextEncode, VAEEncodeForInpaint, InpaintModelConditioning
+from nodes import MAX_RESOLUTION, LatentFromBatch, RepeatLatentBatch, NODE_CLASS_MAPPINGS as ALL_NODE_CLASS_MAPPINGS, ConditioningSetMask, ConditioningConcat, CLIPTextEncode, VAEEncodeForInpaint, InpaintModelConditioning, ConditioningZeroOut
 from .config import MAX_SEED_NUM, BASE_RESOLUTIONS, RESOURCES_DIR, INPAINT_DIR, FOOOCUS_STYLES_DIR, FOOOCUS_INPAINT_HEAD, FOOOCUS_INPAINT_PATCH, BRUSHNET_MODELS, POWERPAINT_MODELS, IPADAPTER_DIR, IPADAPTER_CLIPVISION_MODELS, IPADAPTER_MODELS, DYNAMICRAFTER_DIR, DYNAMICRAFTER_MODELS, IC_LIGHT_MODELS
 from .layer_diffuse import LayerDiffuse, LayerMethod
-from .xyplot import XYplot_ModelMergeBlocks, XYplot_CFG, XYplot_Lora, XYplot_Checkpoint, XYplot_Denoise, XYplot_Steps, XYplot_PromptSR, XYplot_Positive_Cond, XYplot_Negative_Cond, XYplot_Positive_Cond_List, XYplot_Negative_Cond_List, XYplot_SeedsBatch, XYplot_Control_Net, XYplot_Sampler_Scheduler
+from .xyplot import *
 
 from .libs.log import log_node_info, log_node_error, log_node_warn
 from .libs.adv_encode import advanced_encode
@@ -186,7 +186,7 @@ class stylesPromptSelector:
         for index, val in enumerate(values):
             if 'prompt' in all_styles[val]:
                 if "{prompt}" in all_styles[val]['prompt'] and has_prompt == False:
-                    positive_prompt = all_styles[val]['prompt'].format(prompt=positive)
+                    positive_prompt = all_styles[val]['prompt'].replace('{prompt}', positive)
                     has_prompt = True
                 else:
                     positive_prompt += ', ' + all_styles[val]['prompt'].replace(', {prompt}', '').replace('{prompt}', '')
@@ -932,6 +932,9 @@ class fullLoader:
         # Prompt to Conditioning
         positive_embeddings_final, positive_wildcard_prompt, model, clip = prompt_to_cond('positive', model, clip, clip_skip, lora_stack, positive, positive_token_normalization, positive_weight_interpretation, a1111_prompt_style, my_unique_id, prompt, easyCache, model_type=model_type)
         negative_embeddings_final, negative_wildcard_prompt, model, clip = prompt_to_cond('negative', model, clip, clip_skip, lora_stack, negative, negative_token_normalization, negative_weight_interpretation, a1111_prompt_style, my_unique_id, prompt, easyCache, model_type=model_type)
+
+        if negative_embeddings_final is None:
+            negative_embeddings_final, = ConditioningZeroOut().zero_out(positive_embeddings_final)
 
         # Conditioning add controlnet
         if optional_controlnet_stack is not None and len(optional_controlnet_stack) > 0:
@@ -3590,24 +3593,32 @@ class ipadapterApplyRegional(ipadapter):
 
     def apply(self, pipe, image, positive, negative, image_weight, prompt_weight, weight_type, start_at, end_at, mask=None, optional_ipadapter_params=None, prompt=None, my_unique_id=None):
         model = pipe['model']
-        clip = pipe['clip']
-        clip_skip = pipe['loader_settings']['clip_skip']
-        a1111_prompt_style = pipe['loader_settings']['a1111_prompt_style']
-        pipe_lora_stack = pipe['loader_settings']['lora_stack']
-        positive_token_normalization = pipe['loader_settings']['positive_token_normalization']
-        positive_weight_interpretation = pipe['loader_settings']['positive_weight_interpretation']
-        negative_token_normalization = pipe['loader_settings']['negative_token_normalization']
-        negative_weight_interpretation = pipe['loader_settings']['negative_weight_interpretation']
+
         if positive == '':
             positive = pipe['loader_settings']['positive']
         if negative == '':
             negative = pipe['loader_settings']['negative']
 
-        if not clip:
-            raise Exception("No CLIP found")
+        if "clip" not in pipe or not pipe['clip']:
+            if "chatglm3_model" in pipe:
+                chatglm3_model = pipe['chatglm3_model']
+                # text encode
+                log_node_warn("Positive encoding...")
+                positive_embeddings_final = chatglm3_adv_text_encode(chatglm3_model, positive, False)
+                log_node_warn("Negative encoding...")
+                negative_embeddings_final = chatglm3_adv_text_encode(chatglm3_model, negative, False)
+        else:
+            clip = pipe['clip']
+            clip_skip = pipe['loader_settings']['clip_skip']
+            a1111_prompt_style = pipe['loader_settings']['a1111_prompt_style']
+            pipe_lora_stack = pipe['loader_settings']['lora_stack']
+            positive_token_normalization = pipe['loader_settings']['positive_token_normalization']
+            positive_weight_interpretation = pipe['loader_settings']['positive_weight_interpretation']
+            negative_token_normalization = pipe['loader_settings']['negative_token_normalization']
+            negative_weight_interpretation = pipe['loader_settings']['negative_weight_interpretation']
 
-        positive_embeddings_final, positive_wildcard_prompt, model, clip = prompt_to_cond('positive', model, clip, clip_skip, pipe_lora_stack, positive, positive_token_normalization, positive_weight_interpretation, a1111_prompt_style, my_unique_id, prompt, easyCache)
-        negative_embeddings_final, negative_wildcard_prompt, model, clip = prompt_to_cond('negative', model, clip, clip_skip, pipe_lora_stack, negative, negative_token_normalization, negative_weight_interpretation, a1111_prompt_style, my_unique_id, prompt, easyCache)
+            positive_embeddings_final, positive_wildcard_prompt, model, clip = prompt_to_cond('positive', model, clip, clip_skip, pipe_lora_stack, positive, positive_token_normalization, positive_weight_interpretation, a1111_prompt_style, my_unique_id, prompt, easyCache)
+            negative_embeddings_final, negative_wildcard_prompt, model, clip = prompt_to_cond('negative', model, clip, clip_skip, pipe_lora_stack, negative, negative_token_normalization, negative_weight_interpretation, a1111_prompt_style, my_unique_id, prompt, easyCache)
 
         #ipadapter regional
         if "IPAdapterRegionalConditioning" not in ALL_NODE_CLASS_MAPPINGS:
@@ -6158,8 +6169,7 @@ class unsampler:
         noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
         noise_mask = None
         if "noise_mask" in latent:
-            noise_mask = comfy.sample.prepare_mask(latent["noise_mask"], noise.shape, device)
-
+            noise_mask = comfy.sampler_helpers.prepare_mask(latent["noise_mask"], noise.shape, device)
 
         noise = noise.to(device)
         latent_image = latent_image.to(device)
@@ -6868,9 +6878,9 @@ class pipeIn:
         vae = vae if vae is not None else pipe.get("vae")
         if vae is None:
             log_node_warn(f'pipeIn[{my_unique_id}]', "VAE missing from pipeLine")
-        clip = clip if clip is not None else pipe.get("clip")
-        if clip is None:
-            log_node_warn(f'pipeIn[{my_unique_id}]', "Clip missing from pipeLine")
+        clip = clip if clip is not None else pipe.get("clip") if pipe is not None and "clip" in pipe else None
+        # if clip is None:
+        #     log_node_warn(f'pipeIn[{my_unique_id}]', "Clip missing from pipeLine")
         if latent is not None:
             samples = latent
         elif image is None:
@@ -7251,7 +7261,7 @@ class pipeXYPlot:
 
     CATEGORY = "EasyUse/Pipe"
 
-    def plot(self, grid_spacing, output_individuals, flip_xy, x_axis, x_values, y_axis, y_values, pipe=None):
+    def plot(self, grid_spacing, output_individuals, flip_xy, x_axis, x_values, y_axis, y_values, pipe=None, font_path=None):
         def clean_values(values):
             original_values = values.split("; ")
             cleaned_values = []
@@ -7298,6 +7308,7 @@ class pipeXYPlot:
                    "x_vals": x_values,
                    "y_axis": y_axis,
                    "y_vals": y_values,
+                   "custom_font": font_path,
                    "grid_spacing": grid_spacing,
                    "output_individuals": output_individuals}
 
@@ -7311,9 +7322,36 @@ class pipeXYPlot:
         return (new_pipe, xy_plot,)
 
 # pipeXYPlotAdvanced
+import platform
 class pipeXYPlotAdvanced:
+    if platform.system() == "Windows":
+        system_root = os.environ.get("SystemRoot")
+        user_root = os.environ.get("USERPROFILE")
+        font_dir = os.path.join(system_root, "Fonts") if system_root else None
+        user_font_dir = os.path.join(user_root, "AppData","Local","Microsoft","Windows", "Fonts") if user_root else None
+
+    # Default debian-based Linux & MacOS font dirs
+    elif platform.system() == "Linux":
+        font_dir = "/usr/share/fonts/truetype"
+        user_font_dir = None
+    elif platform.system() == "Darwin":
+        font_dir = "/System/Library/Fonts"
+        user_font_dir = None
+    else:
+        font_dir = None
+        user_font_dir = None
+
     @classmethod
     def INPUT_TYPES(s):
+        if s.font_dir and os.path.exists(s.font_dir):
+            font_dir = s.font_dir
+            files_list = [f for f in os.listdir(font_dir) if os.path.isfile(os.path.join(font_dir, f)) and f.lower().endswith(".ttf")]
+        else:
+            flies_list = []
+
+        if s.user_font_dir and os.path.exists(s.user_font_dir):
+            files_list = files_list + [f for f in os.listdir(s.user_font_dir) if os.path.isfile(os.path.join(s.user_font_dir, f)) and f.lower().endswith(".ttf")]
+
         return {
             "required": {
                 "pipe": ("PIPE_LINE",),
@@ -7324,6 +7362,7 @@ class pipeXYPlotAdvanced:
             "optional": {
                 "X": ("X_Y",),
                 "Y": ("X_Y",),
+                "font": (["None"] + files_list,)
             },
             "hidden": {"my_unique_id": "UNIQUE_ID"}
         }
@@ -7334,7 +7373,11 @@ class pipeXYPlotAdvanced:
 
     CATEGORY = "EasyUse/Pipe"
 
-    def plot(self, pipe, grid_spacing, output_individuals, flip_xy, X=None, Y=None, my_unique_id=None):
+    def plot(self, pipe, grid_spacing, output_individuals, flip_xy, X=None, Y=None, font=None, my_unique_id=None):
+        font_path = os.path.join(self.font_dir, font) if font != "None" else None
+        if font_path and not os.path.exists(font_path):
+            font_path = os.path.join(self.user_font_dir, font)
+
         if X != None:
             x_axis = X.get('axis')
             x_values = X.get('values')
@@ -7533,7 +7576,7 @@ class pipeXYPlotAdvanced:
 
             del pipe
 
-        return pipeXYPlot().plot(grid_spacing, output_individuals, flip_xy, x_axis, x_values, y_axis, y_values, new_pipe)
+        return pipeXYPlot().plot(grid_spacing, output_individuals, flip_xy, x_axis, x_values, y_axis, y_values, new_pipe, font_path)
 
 #---------------------------------------------------------------节点束 结束----------------------------------------------------------------------
 
@@ -7787,6 +7830,7 @@ NODE_CLASS_MAPPINGS = {
     "easy XYInputs: Seeds++ Batch": XYplot_SeedsBatch,
     "easy XYInputs: Steps": XYplot_Steps,
     "easy XYInputs: CFG Scale": XYplot_CFG,
+    "easy XYInputs: FluxGuidance": XYplot_FluxGuidance,
     "easy XYInputs: Sampler/Scheduler": XYplot_Sampler_Scheduler,
     "easy XYInputs: Denoise": XYplot_Denoise,
     "easy XYInputs: Checkpoint": XYplot_Checkpoint,
@@ -7912,6 +7956,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "easy XYInputs: Seeds++ Batch": "XY Inputs: Seeds++ Batch //EasyUse",
     "easy XYInputs: Steps": "XY Inputs: Steps //EasyUse",
     "easy XYInputs: CFG Scale": "XY Inputs: CFG Scale //EasyUse",
+    "easy XYInputs: FluxGuidance": "XY Inputs: Flux Guidance //EasyUse",
     "easy XYInputs: Sampler/Scheduler": "XY Inputs: Sampler/Scheduler //EasyUse",
     "easy XYInputs: Denoise": "XY Inputs: Denoise //EasyUse",
     "easy XYInputs: Checkpoint": "XY Inputs: Checkpoint //EasyUse",
